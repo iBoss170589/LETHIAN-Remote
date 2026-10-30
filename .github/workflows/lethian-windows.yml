@@ -1,0 +1,137 @@
+
+name: LETHIAN Remote - Windows x64
+
+on:
+  push:
+    branches:
+      - lethian/branding-windows
+    paths:
+      - .github/workflows/lethian-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    uses: ./.github/workflows/bridge.yml
+
+  windows-helper:
+    uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
+    with:
+      upload-artifact: true
+      target: windows-2022
+      configuration: Release
+      platform: x64
+      target_version: Windows10
+
+  build-windows-x64:
+    name: LETHIAN Remote Windows x64
+    needs: [bridge, windows-helper]
+    runs-on: windows-2022
+
+    env:
+      FLUTTER_VERSION: "3.24.5"
+      LLVM_VERSION: "15.0.6"
+      VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
+      VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+
+    steps:
+      - name: Preparar cache
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Descargar codigo LETHIAN
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Recuperar puente Rust Flutter
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-artifact
+          path: ./
+
+      - name: Instalar LLVM
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: ${{ env.LLVM_VERSION }}
+
+      - name: Instalar Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          architecture: x64
+
+      - name: Preparar motor Flutter de RustDesk
+        shell: pwsh
+        run: |
+          flutter precache --windows
+          Invoke-WebRequest `
+            -Uri "https://github.com/rustdesk/engine/releases/download/main/windows-x64-release.zip" `
+            -OutFile "windows-x64-release.zip"
+          Expand-Archive windows-x64-release.zip -DestinationPath windows-x64-release
+          $engine = "C:/hostedtoolcache/windows/flutter/stable-$env:FLUTTER_VERSION-x64/bin/cache/artifacts/engine/windows-x64-release"
+          Copy-Item "windows-x64-release/*" $engine -Recurse -Force
+
+      - name: Aplicar parche Flutter
+        shell: bash
+        run: |
+          FLUTTER_ROOT=$(dirname $(dirname $(which flutter)))
+          cp .github/patches/flutter_3.24.4_dropdown_menu_enableFilter.diff "$FLUTTER_ROOT/"
+          cd "$FLUTTER_ROOT"
+          git apply flutter_3.24.4_dropdown_menu_enableFilter.diff
+
+      - name: Instalar Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.75"
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+
+      - name: Instalar vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: C:\vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT_ID }}
+          doNotCache: false
+
+      - name: Instalar dependencias Windows
+        shell: bash
+        env:
+          VCPKG_DEFAULT_HOST_TRIPLET: x64-windows-static
+        run: |
+          "$VCPKG_ROOT/vcpkg" install \
+            --triplet x64-windows-static \
+            --x-install-root="$VCPKG_ROOT/installed"
+
+      - name: Compilar LETHIAN Remote
+        shell: pwsh
+        run: |
+          python3 .\build.py --portable --flutter --skip-portable-pack --hwcodec --vram
+          if ($LASTEXITCODE -ne 0) {
+            throw "La compilacion fallo."
+          }
+          Move-Item `
+            "./flutter/build/windows/x64/runner/Release" `
+            "./lethian-remote"
+
+      - name: Incluir componente de Windows
+        uses: actions/download-artifact@v4
+        with:
+          name: topmostwindow-artifacts-x64
+          path: ./lethian-remote
+
+      - name: Guardar paquete de prueba
+        uses: actions/upload-artifact@v4
+        with:
+          name: LETHIAN-Remote-Windows-x64-PRUEBA
+          path: ./lethian-remote/
+          if-no-files-found: error
+          retention-days: 7
